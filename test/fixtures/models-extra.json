@@ -1,0 +1,34 @@
+{
+  "data": [
+    {
+      "id": "qwen3-coder-next",
+      "object": "model",
+      "owned_by": "openai",
+      "max_input_tokens": 131072,
+      "max_output_tokens": 131072
+    },
+    {
+      "id": "qwen3-vl-32b",
+      "object": "model",
+      "owned_by": "openai",
+      "max_input_tokens": 262144,
+      "max_output_tokens": 262144
+    },
+    {
+      "id": "deepseek-r1-distill",
+      "object": "model",
+      "owned_by": "openai",
+      "max_input_tokens": "65536",
+      "max_output_tokens": "65536"
+    },
+    { "id": "llama-3.3-70b-instruct", "object": "model", "owned_by": "openai" },
+    { "id": "bge-m3", "object": "model", "owned_by": "openai" },
+    { "id": "text-embedding-3-large", "object": "model", "owned_by": "openai" },
+    { "id": "kokoro-tts", "object": "model", "owned_by": "openai" },
+    { "id": "bge-reranker-v2", "object": "model", "owned_by": "openai" },
+    { "id": "", "object": "model", "owned_by": "openai" },
+    { "object": "model", "owned_by": "openai" },
+    { "id": "qwen3-coder-next", "object": "model", "owned_by": "duplicate-should-be-dropped" }
+  ],
+  "object": "list"
+}

@@ -1,0 +1,32 @@
+# Dependencies and build output
+node_modules/
+dist/
+coverage/
+.vitest/
+*.tsbuildinfo
+
+# Local environment
+.env
+.env.*
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
+
+# JetBrains — `.idea/` above covers most of it; these land outside it
+*.iml
+*.ipr
+*.iws
+.idea_modules/
+atlassian-ide-plugin.xml
+.fleet/
+.junie/
+.qodana/
+
+# Scratch
+*.log
+tmp/
+
+# Working design doc, not shipped
+PLAN.md

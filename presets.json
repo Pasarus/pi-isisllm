@@ -1,0 +1,81 @@
+{
+  "_readme": [
+    "Curated metadata and heuristics for models served by the ISIS LLM gateway.",
+    "defaults.contextWindow / defaults.maxTokens apply to models the gateway reports but this file does not know.",
+    "exclude: case-insensitive regex sources for non-chat ids (embeddings, TTS, image models, ...). Curated ids and ids with a local override are never excluded.",
+    "reasoningPatterns: case-insensitive regex sources marking an unknown id as reasoning-capable.",
+    "thinkingFormats: compat.thinkingFormat applied to unknown ids by regex, first match wins. Anything unmatched is left unset so pi auto-detects.",
+    "models: METADATA ONLY — this file never registers a model. An id appears in pi only when /v1/models reports it; these entries then decorate it. Set reasoning true only when the gateway returns reasoning_content; compat.thinkingFormat is the chat-template dialect used to toggle thinking. contextWindow/maxTokens here are the OFFLINE fallback only — when /v1/models reports max_input_tokens/max_output_tokens those win (still clamped to half the window), so a bumped deployment needs no edit here."
+  ],
+  "defaults": {
+    "contextWindow": 131072,
+    "maxTokens": 16384
+  },
+  "exclude": [
+    "embed",
+    "rerank",
+    "\\bbge\\b",
+    "\\btts\\b",
+    "\\bstt\\b",
+    "whisper",
+    "moderation",
+    "\\bspeech\\b",
+    "\\baudio\\b",
+    "\\bimage\\b",
+    "dall-e",
+    "flux",
+    "\\bclip\\b",
+    "\\bocr\\b",
+    "vision-encoder",
+    "-ocr$"
+  ],
+  "reasoningPatterns": [
+    "qwen3",
+    "qwen.*coder",
+    "deepseek",
+    "(^|[^a-z0-9])r1([^a-z0-9]|$)",
+    "thinking",
+    "(^|[^a-z0-9])o[13]([^a-z0-9]|$)",
+    "gpt-5",
+    "gemini-2\\.5",
+    "claude-"
+  ],
+  "thinkingFormats": [
+    { "pattern": "^qwen", "format": "qwen-chat-template" },
+    { "pattern": "deepseek", "format": "deepseek" }
+  ],
+  "models": {
+    "qwen3-coder-next": {
+      "name": "Qwen 3 Coder Next",
+      "reasoning": true,
+      "input": ["text"],
+      "contextWindow": 131072,
+      "maxTokens": 16384,
+      "compat": { "maxTokensField": "max_tokens", "thinkingFormat": "qwen-chat-template" }
+    },
+    "qwen3-coder-next-4bit": {
+      "name": "Qwen 3 Coder Next (4-bit)",
+      "reasoning": true,
+      "input": ["text"],
+      "contextWindow": 131072,
+      "maxTokens": 16384,
+      "compat": { "maxTokensField": "max_tokens", "thinkingFormat": "qwen-chat-template" }
+    },
+    "qwen3.8-27b": {
+      "name": "Qwen 3.8 27B (qwen38)",
+      "reasoning": true,
+      "input": ["text"],
+      "contextWindow": 131072,
+      "maxTokens": 16384,
+      "compat": { "maxTokensField": "max_tokens", "thinkingFormat": "qwen-chat-template" }
+    },
+    "qwen3.8-flash-next": {
+      "name": "Qwen 3.8 Flash Next",
+      "reasoning": true,
+      "input": ["text"],
+      "contextWindow": 262144,
+      "maxTokens": 131072,
+      "compat": { "maxTokensField": "max_tokens", "thinkingFormat": "qwen-chat-template" }
+    }
+  }
+}

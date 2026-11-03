@@ -1,0 +1,65 @@
+{
+  "name": "pi-isisllm",
+  "version": "0.1.0",
+  "description": "ISIS LLM gateway provider for the Pi coding agent, with live model discovery from the LiteLLM /v1/models endpoint",
+  "type": "module",
+  "main": "index.ts",
+  "files": [
+    "index.ts",
+    "auth.ts",
+    "config.ts",
+    "discovery.ts",
+    "metadata.ts",
+    "presets.json",
+    "types.ts",
+    "README.md",
+    "AGENTS.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "check": "biome check .",
+    "check:fix": "biome check . --write",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "try": "pi -e ./ --list-models"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "isisllm",
+    "litellm",
+    "openai-compatible",
+    "model-discovery"
+  ],
+  "author": "Samuel Jones",
+  "license": "AGPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Pasarus/pi-isisllm.git"
+  },
+  "homepage": "https://github.com/Pasarus/pi-isisllm#readme",
+  "bugs": {
+    "url": "https://github.com/Pasarus/pi-isisllm/issues"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
