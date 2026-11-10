@@ -131,6 +131,12 @@ string `"undefined"`), which is why `performance/noDelete` is off for `test/**` 
 - **No runtime `dependencies`, no build step.** pi loads the `.ts` files with jiti; imports use
   `.js` specifiers (NodeNext style) and `import type` for types, which is what keeps `tsc` and
   jiti both happy.
+- **Conversation affinity uses pi's own session id.** All models built here are `isisllm`
+  `openai-completions` models. Default `compat.sendSessionAffinityHeaders` to `true` and
+  `compat.sessionAffinityFormat` to `"openrouter"` before merging curated/local compatibility,
+  so pi sends `x-session-id` and explicit overrides still win. Never derive affinity from an API
+  key or generate a replacement UUID. Pi omits these headers with `cacheRetention: "none"`.
+  Responses uses `sessionAffinityFormat` alone; this extension does not register that API.
 - **Stream path is pi's own** (`api: openAICompletionsApi()`). Don't add a custom `streamSimple`
   unless the gateway stops being OpenAI-compatible.
 

@@ -4,6 +4,17 @@ All notable changes to `pi-isisllm` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.1.1
+
+### Fixed
+
+- Enable Pi's native `x-session-id` affinity for ISIS Chat Completions models, including newly
+  discovered ids, so LiteLLM can reuse the same vLLM prefix cache across conversation turns.
+  Existing compatibility metadata and explicit per-model overrides are preserved.
+- Document gateway requirements, cached-catalog refresh, shared-key isolation, and the different
+  compatibility configuration used by Pi's Responses API.
+- Add request-level regression coverage using Pi's native stream path and in-memory conversations.
+
 ## 0.1.0 - initial release
 
 ### Added

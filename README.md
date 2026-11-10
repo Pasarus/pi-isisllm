@@ -99,6 +99,36 @@ capped at `contextWindow / 2` (minimum 1024). The clamp matters because deployme
 and completion — and asking for the whole window as an output budget leaves pi no room for the
 prompt. A `settings/pi-isisllm.json` override outranks the gateway for both fields.
 
+### Conversation affinity and prefix caching
+
+Every Chat Completions model registered by this extension defaults to
+`compat.sendSessionAffinityHeaders: true` and `compat.sessionAffinityFormat: "openrouter"`.
+Pi sends `x-session-id` with its existing conversation UUID; the extension adds no custom HTTP
+handling and generates no identifiers. This applies to the `isisllm` provider, including newly
+discovered models, and leaves other providers alone. Per-model compatibility overrides still win.
+
+LiteLLM must enable `session_affinity` for the model group. With `least-busy` routing, new
+conversations can be assigned independently while subsequent turns reuse the chosen vLLM replica
+and its prefix cache. A shared team API key authenticates requests; it is not the affinity ID.
+Different conversations have different IDs but may still be assigned to the same replica.
+Affinity is best effort: expiry, failover, replica restarts and cache eviction can reduce reuse.
+The measured benefit depends on the cached prefix and load; affinity alone does not guarantee a
+particular latency.
+
+Verified with Pi 1.5.0 and its
+[model compatibility documentation](https://github.com/earendil-works/pi/blob/v1.5.0/packages/coding-agent/docs/models-configuration.md).
+Pi omits affinity headers when `cacheRetention: "none"` or no `sessionId` is supplied.
+After upgrading, run `/isisllm refresh` so Pi replaces older cached model metadata; remove any
+shadowing `isisllm` block from `models.json`.
+
+This extension currently registers only `openai-completions`. Pi's `openai-responses` API uses
+`compat.sessionAffinityFormat: "openrouter"` alone to send `x-session-id`; it does not use the
+Chat Completions `sendSessionAffinityHeaders` switch. Do not copy both flags into Responses models.
+
+The `qwen3.8-27b` context fallback is 131072 tokens, matching the deployed vLLM
+`--max-model-len`. Gateway-reported limits and explicit settings overrides retain their existing
+precedence.
+
 ### Fixing or curating a model without forking
 
 Put an override in `~/.pi/agent/settings/pi-isisllm.json`. This is your layer: it wins over the
@@ -183,6 +213,7 @@ Invalid fields are ignored with a warning shown by `/isisllm status`; the extens
 | A model you expect is missing | Its id matches an `exclude` pattern (embeddings, TTS, image models are filtered by default). Check `/isisllm models`, then add a `models` entry for it — curated and overridden ids are never excluded. |
 | Model answers but thinking/tools look wrong | It is `(unverified)`: heuristics guessed its capabilities. Set the right `reasoning` / `compat` in the settings file (see above). |
 | Token limits or a retired model look wrong | Your `models.json` still defines `isisllm`: those entries override the live ones and linger after retirement. `/isisllm doctor` confirms; delete that block. |
+| Warm turns repeatedly process the full prompt | Run `/isisllm refresh` to replace old cached compatibility metadata, remove a shadowing `isisllm` block in `models.json`, and check per-model affinity overrides and Pi cache retention. The gateway must enable session affinity for the model group; restarts, expiry and failover can still move a conversation. |
 | Startup feels slow | It shouldn't: discovery is never awaited during startup and gives up after `timeoutMs` (default 8000 ms). |
 
 ## Development
