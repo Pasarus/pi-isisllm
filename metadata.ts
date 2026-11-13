@@ -188,6 +188,9 @@ export function toPiModel(entry: GatewayModelEntry, context: MetadataContext): C
   const compat: NonNullable<ChatModel["compat"]> = {
     // vLLM/LiteLLM reject `max_completion_tokens`; the user's hand-written models.json used this too.
     maxTokensField: "max_tokens",
+    // Route this Pi conversation to the same LiteLLM deployment for vLLM prefix-cache reuse.
+    sendSessionAffinityHeaders: true,
+    sessionAffinityFormat: "openrouter",
     ...(thinkingFormat ? { thinkingFormat } : {}),
     ...(curated.compat ?? {}),
   };

@@ -56,6 +56,8 @@ describe("curated metadata", () => {
       expect([model.contextWindow, model.maxTokens]).toEqual(curatedLimits[model.id]);
       expect(model.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
       expect(model.compat?.maxTokensField).toBe("max_tokens");
+      expect(model.compat?.sendSessionAffinityHeaders).toBe(true);
+      expect(model.compat?.sessionAffinityFormat).toBe("openrouter");
       expect(model.compat?.thinkingFormat).toBe("qwen-chat-template");
       expect(model.name).not.toContain("(unverified)");
     }
@@ -72,6 +74,35 @@ describe("curated metadata", () => {
 });
 
 describe("toPiModel", () => {
+  it("enables affinity for newly discovered ISIS models without changing the presets", () => {
+    const ctx = context();
+    const before = structuredClone(ctx.presets);
+    const model = toPiModel({ id: "new-team-model" }, ctx);
+    expect(model.compat).toEqual({
+      maxTokensField: "max_tokens",
+      sendSessionAffinityHeaders: true,
+      sessionAffinityFormat: "openrouter",
+    });
+    expect(ctx.presets).toEqual(before);
+  });
+
+  it("preserves curated compatibility and lets local settings override affinity defaults", () => {
+    const ctx = makeMetadataContext({
+      models: {
+        "qwen3.8-27b": {
+          compat: { sendSessionAffinityHeaders: false, sessionAffinityFormat: "openai-nosession" },
+        },
+      },
+    });
+    const model = toPiModel({ id: "qwen3.8-27b" }, ctx);
+    expect(model.compat).toEqual({
+      maxTokensField: "max_tokens",
+      thinkingFormat: "qwen-chat-template",
+      sendSessionAffinityHeaders: false,
+      sessionAffinityFormat: "openai-nosession",
+    });
+  });
+
   it("clamps an output limit that equals the context window", () => {
     const model = toPiModel(
       { id: "qwen3-tiny", max_input_tokens: 131072, max_output_tokens: 131072 },

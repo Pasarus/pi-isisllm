@@ -1,6 +1,6 @@
 {
   "name": "pi-isisllm",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "ISIS LLM gateway provider for the Pi coding agent, with live model discovery from the LiteLLM /v1/models endpoint",
   "type": "module",
   "main": "index.ts",
