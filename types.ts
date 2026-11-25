@@ -18,8 +18,18 @@ export const SETTINGS_FILE = "pi-isisllm.json";
 /** Chat model shape produced for this provider's API. */
 export type ChatModel = Model<"openai-completions">;
 
-/** Model input modalities (the gateway's /v1/models never reports these). */
+/** Model input modalities. Image input is only advertised when the gateway claims it. */
 export type ModelInput = "text" | "image";
+
+/** What the gateway itself said about a model's inputs. Absent means it never said. */
+export interface GatewayCapabilities {
+  /**
+   * Image ingestion. `true` when the deployment advertises vision/image input (LiteLLM
+   * `supports_vision` / `supports_image_input`, or an `image` entry in a modality list),
+   * `false` when it explicitly says it cannot take images.
+   */
+  image?: boolean;
+}
 
 /** One entry of the gateway's `GET /v1/models` response. */
 export interface GatewayModelEntry {
@@ -29,6 +39,8 @@ export interface GatewayModelEntry {
   /** LiteLLM passes these through from the deployment; often absent. */
   max_input_tokens?: number;
   max_output_tokens?: number;
+  /** Capability flags carried by the entry itself; current LiteLLM sends none. */
+  capabilities?: GatewayCapabilities;
 }
 
 /** Curated metadata for one model id, from `presets.json` or the local settings file. */
@@ -78,6 +90,17 @@ export interface IsisllmSettings {
   models?: Record<string, ModelMetadata>;
   /** Hide the `models.json` shadowing warning. */
   quietModelsJsonWarning?: boolean;
+  /**
+   * How the extension learns what each model can ingest.
+   * - `"auto"` (default): ask, best-effort — `GET {baseUrl}/models` flags plus
+   *   `GET {baseUrl}/model/info` (`supports_vision`); any failure is ignored.
+   * - `"probe"`: as `"auto"`, then send one 1-token completion with a 1×1 image to every model the
+   *   gateway said nothing about, and read the answer (accepted → image-capable, refused image
+   *   content → text-only). Costs a minimal completion per unknown model per refresh, so it is
+   *   opt-in; use it when the gateway serves custom deployments that LiteLLM has no metadata for.
+   * - `"off"`: never call the capability endpoint or probe; presets and settings decide.
+   */
+  capabilities?: "auto" | "probe" | "off";
 }
 
 /** Everything the extension needs after env vars, settings and presets are merged. */
@@ -105,4 +128,10 @@ export interface DiscoveryState {
   modelCount: number;
   source: ModelSource;
   error: string | null;
+  /**
+   * How the last run resolved image input: what `{baseUrl}/model/info` reported, why it could
+   * not be asked, or that presets/overrides decided. Shown by `/isisllm status` / `doctor` so a
+   * text-only model is explainable instead of mysterious.
+   */
+  capabilities: string | null;
 }

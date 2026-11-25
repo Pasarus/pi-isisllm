@@ -25,7 +25,6 @@ import { discoverModels, getDiscoveryState, recordDiscoveryError } from "./disco
 import type { ChatModel } from "./types.js";
 import { type IsisllmConfig, type ModelSource, PROVIDER_ID, PROVIDER_NAME } from "./types.js";
 
-const WIDGET_KEY = "pi-isisllm";
 const UNVERIFIED_SUFFIX = " (unverified)";
 /** Deadline for the one-off cold-start fetch in the factory; startup must not hang on it. */
 const SEED_TIMEOUT_MS = 4000;
@@ -83,6 +82,11 @@ function formatAge(timestamp: number | null): string {
 
 function isUnverified(model: Model<string>): boolean {
   return model.name.endsWith(UNVERIFIED_SUFFIX);
+}
+
+/** How many registered models pi may send images to. */
+function countImageModels(models: Model<string>[]): number {
+  return models.filter((model) => model.input.includes("image")).length;
 }
 
 /**
@@ -147,6 +151,10 @@ async function refreshProvider(
       ...(error ? { error: error.message } : {}),
       models: registered(),
     };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    recordDiscoveryError(message);
+    return { ok: false, aborted: false, error: message, models: registered() };
   } finally {
     clearTimeout(timer);
   }
@@ -172,6 +180,9 @@ function statusLines(
   const lines = [
     `${PROVIDER_NAME}: ${models.length} models (${models.length - unverified} curated, ${unverified} unverified) · ${modelSource(models)} · refreshed ${formatAge(state.at)}`,
     `  endpoint ${config.modelsUrl} · key ${keySource}`,
+    `  image input: ${countImageModels(models)}/${models.length} ${
+      state.capabilities ? `· ${state.capabilities}` : "· capability probe has not run yet"
+    }`,
   ];
   if (models.length === 0) {
     lines.push(
@@ -192,6 +203,7 @@ function modelTable(models: Model<string>[]): string[] {
     return [
       model.id,
       model.reasoning ? "yes" : "no",
+      model.input.includes("image") ? "yes" : "no",
       `${Math.round(model.contextWindow / 1024)}K`,
       `${Math.round(model.maxTokens / 1024)}K`,
       compat?.thinkingFormat ?? "auto",
@@ -200,9 +212,9 @@ function modelTable(models: Model<string>[]): string[] {
   });
   const widths = rows.reduce<number[]>(
     (widths, row) => widths.map((width, column) => Math.max(width, row[column]?.length ?? 0)),
-    [0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0],
   );
-  const header = ["model", "think", "ctx", "max-out", "thinkingFormat", "maxTokensField"];
+  const header = ["model", "think", "images", "ctx", "max-out", "thinkingFormat", "maxTokensField"];
   const format = (cells: string[]) =>
     cells
       .map((cell, column) =>
@@ -278,46 +290,43 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
   async function startupRefresh(services: Services): Promise<void> {
     await sleep(STARTUP_DELAY_MS);
-    if ((await refreshAndRender(services)).aborted) {
+    let outcome = await refreshProvider(services, config, catalog);
+    if (outcome.aborted) {
       await sleep(RETRY_DELAY_MS);
-      await refreshAndRender(services);
-    }
-  }
-
-  async function refreshAndRender(services: Services): Promise<RefreshOutcome> {
-    let outcome: RefreshOutcome;
-    try {
       outcome = await refreshProvider(services, config, catalog);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      outcome = { ok: false, aborted: false, error: message, models: catalog() };
     }
     try {
       const keySource = await describeKey(services, config);
-      services.ui.setWidget(
-        WIDGET_KEY,
-        statusLines(config, catalog(), keySource, availabilityNote(services)),
-      );
-      if (keySource === "missing" && !notifiedMissingKey) {
-        notifiedMissingKey = true;
-        services.ui.notify(
-          `ISIS LLM: no API key — export ${config.apiKeyEnv} or run /login and choose "${PROVIDER_NAME}" to discover models.`,
-          "warning",
-        );
+      if (keySource === "missing") {
+        if (!notifiedMissingKey) {
+          notifiedMissingKey = true;
+          services.ui.notify(
+            `ISIS LLM: no API key — export ${config.apiKeyEnv} or run /login and choose "${PROVIDER_NAME}" to discover models.`,
+            "warning",
+          );
+        }
+        return;
+      }
+      if (!outcome.ok) {
+        const reason =
+          outcome.error ??
+          getDiscoveryState().error ??
+          (outcome.aborted ? "model discovery was cancelled" : "unknown error");
+        const lines = [`ISIS LLM: refresh failed — ${reason}`];
+        if (outcome.models.length > 0) {
+          lines.push(
+            `  keeping ${outcome.models.length} model(s) from the last successful refresh.`,
+          );
+        }
+        services.ui.notify(lines.join("\n"), "warning");
       }
     } catch {
-      // The session was replaced, or the run ended, while we were refreshing: nothing to paint.
+      // The session was replaced, or the run ended, while we were refreshing: nothing to notify.
     }
-    return outcome;
   }
 
   pi.on("session_start", async (_event, ctx) => {
     const services = servicesOf(ctx);
-    const keySource = await describeKey(services, config);
-    services.ui.setWidget(
-      WIDGET_KEY,
-      statusLines(config, catalog(), keySource, availabilityNote(services)),
-    );
 
     // pi boots cache-only (`allowModelNetwork: false`), so this is what makes discovery run
     // without the user opening /model. Never awaited, in any mode: a forced refresh in flight
@@ -326,10 +335,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       startupRefreshed = true;
       void startupRefresh(services).catch(() => {});
     }
-  });
-
-  pi.on("input", async (_event, ctx) => {
-    ctx.ui.setWidget(WIDGET_KEY, undefined);
   });
 
   pi.registerCommand("isisllm", {
@@ -352,14 +357,14 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       }
 
       if (subcommand === "refresh") {
-        const outcome = await refreshAndRender(servicesOf(ctx));
+        const outcome = await refreshProvider(services, config, catalog);
         const state = getDiscoveryState();
         const lines = outcome.ok
           ? [
               `ISIS LLM: refreshed ${outcome.models.length} models from ${config.modelsUrl} (${formatAge(state.at)}).`,
             ]
           : [
-              `ISIS LLM: refresh failed — ${outcome.error ?? getDiscoveryState().error ?? "unknown error"}`,
+              `ISIS LLM: refresh failed — ${outcome.error ?? state.error ?? "unknown error"}`,
               `  keeping ${outcome.models.length} model(s) from the last successful refresh.`,
             ];
         ctx.ui.notify(lines.join("\n"), outcome.ok ? "info" : "warning");
@@ -395,6 +400,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
           });
           const curated = discovered.filter((model) => !isUnverified(model)).length;
           lines.push(`- discovery: ok, ${discovered.length} models (${curated} curated)`);
+          lines.push(
+            `- image input: ${countImageModels(discovered)}/${discovered.length} models accept images · ${
+              getDiscoveryState().capabilities ?? "capability endpoint did not report"
+            }`,
+          );
         } catch (error) {
           lines.push(`- discovery: ${error instanceof Error ? error.message : String(error)}`);
         }

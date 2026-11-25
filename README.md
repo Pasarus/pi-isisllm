@@ -63,13 +63,13 @@ The extension never reads or rewrites `models.json` beyond that read-only check.
 | | |
 |---|---|
 | `/model` | exactly the models your key can see on the gateway right now, discovered live |
-| `/isisllm` | base URL, key source, curated/unverified counts, last refresh, last error |
-| `/isisllm models` | table of registered models with `reasoning`, window, `thinkingFormat`, `maxTokensField` |
+| `/isisllm` | base URL, key source, curated/unverified counts, image-input verdicts, last refresh, last error |
+| `/isisllm models` | table of registered models with `reasoning`, `images`, window, `thinkingFormat`, `maxTokensField` |
 | `/isisllm refresh` | force a network refresh now and report what changed |
-| `/isisllm doctor` | key, `models.json` shadowing, settings file, and a live endpoint probe |
-| startup widget | one status line under the editor until you type |
+| `/isisllm doctor` | key, `models.json` shadowing, settings file, live endpoint probe, and how image input was decided |
 
-Models are discovered from `GET {baseUrl}/models` shortly after the session opens. pi persists the
+Models are discovered from `GET {baseUrl}/models` shortly after the session opens (quiet on
+success, warning notification if the key is missing or the refresh fails). pi persists the
 result in `~/.pi/agent/models-store.json` and restores it on the next cache-only startup, so offline
 starts still list the last known live set — `/isisllm status` labels that `cached`, versus `live`
 once a fresh fetch has landed, and `none` when nothing has been discovered yet.
@@ -84,7 +84,7 @@ and the display name suffix `(unverified)`:
 | Field | Curated model | Unknown model |
 |---|---|---|
 | `reasoning` | from preset | pattern match (`qwen3…`, `deepseek`, `r1`, `-thinking`, `gpt-5`, …) |
-| `input` | from preset | `["text"]` — `/v1/models` never reports modalities |
+| `input` | your override, else what the gateway reported, else preset | your override, else what the gateway reported, else `["text"]` |
 | `contextWindow` | gateway `max_input_tokens`, else preset, else `131072` | gateway `max_input_tokens`, else `131072` |
 | `maxTokens` | gateway `max_output_tokens`, else preset, else `16384` | gateway `max_output_tokens`, else `16384` |
 | `cost` | `0` | `0` (the gateway bills nothing through pi) |
@@ -128,12 +128,71 @@ Chat Completions `sendSessionAffinityHeaders` switch. Do not copy both flags int
 The `qwen3.8-27b` context fallback is 131072 tokens, matching the deployed vLLM
 `--max-model-len`. Gateway-reported limits and explicit settings overrides retain their existing
 precedence.
+### Images and vision models
+
+pi only attaches an image to a request when the model advertises `input: ["text", "image"]`. This
+extension never guesses that: it comes from what the gateway itself reports, in this order
+
+1. your `models.<id>.input` in `~/.pi/agent/settings/pi-isisllm.json`,
+2. **whatever the gateway reported** — capability flags on the `GET {baseUrl}/models` entry
+   (`supports_vision`, `supports_image_input`, or an `input_modalities` list containing `image`),
+   else the `supports_vision` flags of the deployments behind that id in `GET {baseUrl}/model/info`,
+3. `presets.json`,
+4. `"text"`.
+
+So a deployment the gateway says it can serve images to becomes image-capable in `/model` with no
+edit here, and one the gateway says it *cannot* stays text-only even if a preset says otherwise.
+When nobody says anything, the model is text-only: a wrong "yes" lets pi attach an image that the
+gateway then rejects with a 400 in the middle of your task, which is worse than a model you can opt
+into yourself.
+
+Two things worth knowing about `{baseUrl}/model/info`:
+
+- A model id can sit behind several deployments. The answer is conservative — if **any** deployment
+  reports `supports_vision: false`, the id is text-only, because LiteLLM may route your request to
+  that one.
+- The call is best-effort and runs next to the model list. An older gateway, a key that is not
+  allowed to call it, or Open WebUI answering with its SPA just means "no capability data" —
+  discovery still succeeds. Nothing from that payload except the capability flags is ever shown;
+  it contains internal `api_base` hostnames. Set `"capabilities": "off"` in the settings file to
+  skip the call entirely.
+
+**When the gateway cannot tell you — probe mode.** A custom deployment (a vLLM engine whose model
+name is not in LiteLLM's cost map) answers `supports_vision: null`, so nothing reports its
+capability — which is exactly the case for the ISIS gateway today. Set `"capabilities": "probe"` to
+have the extension measure it instead: for every model nobody vouched for it sends one completion
+with a 1×1 PNG and a one-token budget and reads the answer — accepted means image-capable, a refusal
+that mentions images/multimodal means text-only, anything else (auth, rate limit, timeout, an
+unrelated 400) means *no verdict* and the presets decide. It costs one minimal completion per
+unknown model per refresh, at most three in flight, and a cold start can then take up to
+`timeoutMs` longer. It deliberately outranks `presets.json` in both directions, because a
+deployment gets reconfigured without anyone editing this repo; the default `"auto"` never sends one.
+
+`/isisllm status` and `/isisllm doctor` report both halves: how many registered models accept
+images and what the endpoint said — for example
+`image input: 1/4 · model/info reported no capability flags`, which is the current state of the
+ISIS LLM gateway in the default mode: no deployment reports `supports_vision` (those ids are not in
+LiteLLM's cost map), so `qwen3.8-flash-next` is image-capable because `presets.json` records that
+its engine serves images (`qwen3.8-27b` answers `At most 0 image(s) may be provided`,
+`qwen3-coder-next` answers `is not a multimodal model`). In `"probe"` mode the same line explains
+itself:
+`image input: 1/4 · model/info reported no capability flags · probe: 1/3 probed model(s) accept images`
+— four asked, three verdicts, the fourth (`qwen3-coder-next-4bit`) refused for a reason that says
+nothing about modalities (`Invalid model name`), so it was left to the presets rather than guessed.
+
+If your gateway starts declaring the capability — `model_info: {supports_vision: true}` in the
+LiteLLM config is the way to do it for every client, not just pi — the gateway's word takes over
+with no change here. If instead the gateway is wrong, pin it yourself:
+
+```json
+{ "models": { "qwen3-vl-32b": { "input": ["text", "image"] } } }
+```
 
 ### Fixing or curating a model without forking
 
 Put an override in `~/.pi/agent/settings/pi-isisllm.json`. This is your layer: it wins over the
-gateway's reported token limits and over `presets.json`, and it survives `pi update` (unlike the
-installed copy of `presets.json`, which is repo data and gets overwritten):
+gateway's reported token limits and modalities and over `presets.json`, and it survives `pi update`
+(unlike the installed copy of `presets.json`, which is repo data and gets overwritten):
 
 ```json
 {
@@ -178,6 +237,7 @@ Env vars:
   "baseUrl": "https://isisllm.rl.ac.uk/v1",
   "apiKeyEnv": "ISISLLM_API_KEY",
   "timeoutMs": 8000,
+  "capabilities": "auto",
   "exclude": ["^test-", "^sandbox/"],
   "models": {
     "some-model": {
@@ -194,8 +254,12 @@ Env vars:
 ```
 
 Per-model entries accept exactly the fields in the table under [How models are described](#how-models-are-described)
-(`thinkingLevelMap` also allowed), and they outrank the gateway's reported token limits for that id.
+(`thinkingLevelMap` also allowed), and they outrank the gateway's reported token limits and input
+modalities for that id.
 `exclude` patterns are appended to the bundled ones; an id with a `models` entry is never excluded.
+`capabilities` (`"auto"` | `"probe"` | `"off"`) decides how image input is learned: ask the gateway
+(the default), also measure unknown models with a throwaway completion, or never leave the metadata
+alone.
 
 Invalid fields are ignored with a warning shown by `/isisllm status`; the extension still loads.
 
@@ -212,6 +276,8 @@ Invalid fields are ignored with a warning shown by `/isisllm status`; the extens
 | Newly published model shows up a second after launch | Expected: discovery runs shortly after the session opens and retries once if pi's own refresh passes cancelled it. `/isisllm refresh` forces it immediately. |
 | A model you expect is missing | Its id matches an `exclude` pattern (embeddings, TTS, image models are filtered by default). Check `/isisllm models`, then add a `models` entry for it — curated and overridden ids are never excluded. |
 | Model answers but thinking/tools look wrong | It is `(unverified)`: heuristics guessed its capabilities. Set the right `reasoning` / `compat` in the settings file (see above). |
+| pi refuses to attach an image, or the gateway answers `At most 0 image(s) may be provided` / `not a multimodal model` | The model is not image-capable. `/isisllm models` shows the `images` column and `/isisllm status` shows what the gateway reported. If the gateway is wrong, pin `"input": ["text", "image"]` for that id in the settings file. |
+| A vision model you added is listed as text-only | The gateway does not vouch for it (`supports_vision` absent or `false`, or one deployment behind that id is text-only). `/isisllm doctor` shows the verdict. Curate it in `presets.json`, pin `input` in your settings file, or set `"capabilities": "probe"` to have the extension ask the deployment directly. |
 | Token limits or a retired model look wrong | Your `models.json` still defines `isisllm`: those entries override the live ones and linger after retirement. `/isisllm doctor` confirms; delete that block. |
 | Warm turns repeatedly process the full prompt | Run `/isisllm refresh` to replace old cached compatibility metadata, remove a shadowing `isisllm` block in `models.json`, and check per-model affinity overrides and Pi cache retention. The gateway must enable session affinity for the model group; restarts, expiry and failover can still move a conversation. |
 | Startup feels slow | It shouldn't: discovery is never awaited during startup and gives up after `timeoutMs` (default 8000 ms). |

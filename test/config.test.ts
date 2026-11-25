@@ -41,6 +41,7 @@ describe("parseSettings", () => {
         exclude: ["^sandbox-"],
         models: { "qwen3-x": { reasoning: true } },
         quietModelsJsonWarning: true,
+        capabilities: "off",
       }),
     );
     expect(warnings).toEqual([]);
@@ -51,7 +52,16 @@ describe("parseSettings", () => {
       exclude: ["^sandbox-"],
       models: { "qwen3-x": { reasoning: true } },
       quietModelsJsonWarning: true,
+      capabilities: "off",
     });
+  });
+
+  it('accepts capabilities: "auto"/"probe" and warns on anything else', () => {
+    expect(parseSettings('{"capabilities":"auto"}').settings.capabilities).toBe("auto");
+    expect(parseSettings('{"capabilities":"probe"}').settings.capabilities).toBe("probe");
+    const bad = parseSettings('{"capabilities":true}');
+    expect(bad.settings).toEqual({});
+    expect(bad.warnings.join(" ")).toContain('"auto", "probe" or "off"');
   });
 
   it("drops invalid fields with warnings instead of throwing", () => {
@@ -62,10 +72,11 @@ describe("parseSettings", () => {
         timeoutMs: "soon",
         exclude: "embed",
         models: [],
+        capabilities: "maybe",
       }),
     );
     expect(settings).toEqual({});
-    expect(warnings).toHaveLength(5);
+    expect(warnings).toHaveLength(6);
     expect(warnings.join("\n")).toContain("apiKeyEnv");
   });
 

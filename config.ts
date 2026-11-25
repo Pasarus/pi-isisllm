@@ -107,6 +107,18 @@ export function parseSettings(raw: string): { settings: IsisllmSettings; warning
   if (typeof parsed.quietModelsJsonWarning === "boolean")
     settings.quietModelsJsonWarning = parsed.quietModelsJsonWarning;
 
+  if (parsed.capabilities !== undefined) {
+    if (
+      parsed.capabilities === "auto" ||
+      parsed.capabilities === "off" ||
+      parsed.capabilities === "probe"
+    ) {
+      settings.capabilities = parsed.capabilities;
+    } else {
+      warnings.push('ignoring settings capabilities: expected "auto", "probe" or "off"');
+    }
+  }
+
   return { settings, warnings };
 }
 

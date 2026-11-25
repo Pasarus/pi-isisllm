@@ -58,7 +58,6 @@ function createContext(
   } = {},
 ) {
   const notifications: { message: string; type?: string }[] = [];
-  const widgets: [string, string[] | undefined][] = [];
   const refresh = vi.fn(async () => options.refreshResult ?? { aborted: false, errors: new Map() });
   const ctx = {
     modelRegistry: {
@@ -72,13 +71,10 @@ function createContext(
       notify: (message: string, type?: string) => {
         notifications.push({ message, type });
       },
-      setWidget: (key: string, content: string[] | undefined) => {
-        widgets.push([key, content]);
-      },
     },
   } as unknown as ExtensionContext;
   (ctx as { mode?: string }).mode = options.mode ?? "tui";
-  return { ctx, notifications, widgets, refresh };
+  return { ctx, notifications, refresh };
 }
 
 /** A chat model record good enough for pi's provider catalog bookkeeping. */
@@ -189,17 +185,15 @@ describe("extension factory", () => {
     await vi.waitFor(() => expect(passes).toBe(2), { timeout: 8000 });
   });
 
-  it("renders the widget from the discovered catalog and clears it on input", async () => {
+  it("stays silent when the startup refresh succeeds", async () => {
     const { pi, harness } = createPi();
     await extensionFactory(pi);
     await seedCatalog(harness.provider, [modelFixture("served-a")]);
 
-    const { ctx, widgets } = createContext({ authSource: "ISISLLM_API_KEY" });
+    const { ctx, notifications, refresh } = createContext({ authSource: "ISISLLM_API_KEY" });
     await harness.events.get("session_start")?.({} as never, ctx);
-    expect(widgets.at(-1)?.[1]?.[0]).toContain("ISIS LLM: 1 models");
-
-    await harness.events.get("input")?.({} as never, ctx);
-    expect(widgets.some(([, content]) => content === undefined)).toBe(true);
+    await vi.waitFor(() => expect(refresh).toHaveBeenCalledTimes(1), { timeout: 8000 });
+    expect(notifications).toEqual([]);
   });
 
   it("never awaits the refresh, even in print mode", async () => {
@@ -213,14 +207,28 @@ describe("extension factory", () => {
     expect(refresh).not.toHaveBeenCalled();
   });
 
-  it("says so in the widget while nothing has been discovered", async () => {
+  it("warns when the startup refresh fails", async () => {
     const { pi, harness } = createPi();
     await extensionFactory(pi);
+    await seedCatalog(harness.provider, [modelFixture("served-a")]);
 
-    const { ctx, widgets } = createContext({ authSource: "ISISLLM_API_KEY" });
+    const { ctx, notifications } = createContext({
+      authSource: "ISISLLM_API_KEY",
+      refreshResult: {
+        aborted: false,
+        errors: new Map([["isisllm", new Error("502 Bad Gateway")]]),
+      },
+    });
     await harness.events.get("session_start")?.({} as never, ctx);
-    expect(widgets.at(-1)?.[1]?.[0]).toContain("ISIS LLM: 0 models");
-    expect(widgets.at(-1)?.[1]).toContain("  no live models yet — run /isisllm refresh");
+    await vi.waitFor(
+      () => {
+        expect(notifications).toHaveLength(1);
+      },
+      { timeout: 8000 },
+    );
+    expect(notifications[0]?.type).toBe("warning");
+    expect(notifications[0]?.message).toContain("ISIS LLM: refresh failed — 502 Bad Gateway");
+    expect(notifications[0]?.message).toContain("keeping 1 model(s)");
   });
 
   it("notifies once when no key is configured", async () => {
@@ -263,7 +271,10 @@ describe("cold start", () => {
     const { pi, harness } = createPi();
     await extensionFactory(pi);
 
-    expect(calls).toEqual(["https://isisllm.rl.ac.uk/v1/models"]);
+    expect(calls).toEqual([
+      "https://isisllm.rl.ac.uk/v1/models",
+      "https://isisllm.rl.ac.uk/v1/model/info",
+    ]);
     expect(harness.provider?.getModels().map((entry) => entry.id)).toEqual([
       "qwen3-coder-next",
       "qwen3-coder-next-4bit",
@@ -317,6 +328,7 @@ describe("/isisllm", () => {
     name: "Qwen 3 Coder Next",
     provider: "isisllm",
     reasoning: true,
+    input: ["text"],
     contextWindow: 131072,
     maxTokens: 16384,
     compat: { thinkingFormat: "qwen-chat-template", maxTokensField: "max_tokens" },
@@ -326,8 +338,20 @@ describe("/isisllm", () => {
     name: "Llama 3.3 70b (unverified)",
     provider: "isisllm",
     reasoning: false,
+    input: ["text"],
     contextWindow: 131072,
     maxTokens: 16384,
+    compat: { maxTokensField: "max_tokens" },
+  };
+  /** What a deployment the gateway vouched for looks like after discovery. */
+  const vision = {
+    id: "qwen3-vl-32b",
+    name: "Qwen3 Vl 32b (unverified)",
+    provider: "isisllm",
+    reasoning: false,
+    input: ["text", "image"],
+    contextWindow: 262144,
+    maxTokens: 131072,
     compat: { maxTokensField: "max_tokens" },
   };
 
@@ -339,7 +363,7 @@ describe("/isisllm", () => {
     await extensionFactory(pi);
     const { registered = [model, discovered], ...contextOptions } = options ?? {};
     await seedCatalog(harness.provider, registered);
-    const context = createContext({ models: [model, discovered], ...contextOptions });
+    const context = createContext({ models: registered, ...contextOptions });
     await harness.commands.get("isisllm")?.handler(subcommand, context.ctx);
     return { harness, ...context };
   }
@@ -375,6 +399,22 @@ describe("/isisllm", () => {
     expect(content).toContain("qwen3-coder-next");
     expect(content).toContain("128K");
     expect(content).toContain("qwen-chat-template");
+  });
+
+  it("shows which models pi may send images to", async () => {
+    const { harness } = await run("models", { registered: [model, vision] });
+    const rows = (harness.sent.at(-1)?.content ?? "").split("\n");
+    expect(rows[0]).toContain("images");
+    expect(rows.find((row) => row.includes("qwen3-coder-next"))).toContain("no");
+    expect(rows.find((row) => row.includes("qwen3-vl-32b"))).toContain("yes");
+  });
+
+  it("reports how many models accept images", async () => {
+    const { notifications } = await run("", {
+      authSource: "stored credential",
+      registered: [model, vision],
+    });
+    expect(notifications.at(-1)?.message).toContain("image input: 1/2");
   });
 
   it("forces a refresh and reports failures without losing models", async () => {

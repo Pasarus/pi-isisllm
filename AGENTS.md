@@ -15,22 +15,26 @@ Distribution is from git (`github.com/Pasarus/pi-isisllm`), never npm.
 index.ts      extension factory: createProvider(...) → pi.registerProvider(provider)
               · live-only catalog: cold-start seed, then each refresh replaces it wholesale
               · deferred, retried, fire-and-forget refresh on session_start (pi boots cache-only)
-              · startup widget + /isisllm [status|models|refresh|doctor]
+              · warning notification on refresh failure + /isisllm [status|models|refresh|doctor]
    ├─ auth.ts        ApiKeyAuth: env var first, then the /login credential; masked login()
    ├─ discovery.ts   fetchGatewayModels(): GET {baseUrl}/models + error classification
+   │                 fetchGatewayCapabilities(): best-effort GET {baseUrl}/model/info
+   │                 probeImageSupport(): opt-in POST {baseUrl}/chat/completions capability probe
    │                 discoverModels(): key resolution → fetch → metadata → in-memory state
-   ├─ metadata.ts    pure functions: toPiModel(), buildModels()
-   │                 live token limits → preset metadata → local overrides, + clamping
+   ├─ metadata.ts    pure functions: toPiModel(), buildModels(), resolveInput()
+   │                 live token limits + gateway image capability → preset metadata → local
+   │                 overrides, + clamping
    └─ presets.json   metadata for known ids + defaults, exclude/reasoning/thinkingFormat patterns
 config.ts     env + ~/.pi/agent/settings/pi-isisllm.json + presets → IsisllmConfig
 types.ts      shared shapes (no runtime imports beyond pi types)
-test/         vitest suites + fixtures/models.json (captured real gateway response)
+test/         vitest suites + fixtures/models.json, fixtures/model-info.json (captured real responses)
 ```
 
 Caching belongs to pi, not to us: `createProvider({ fetchModels })` restores the persisted catalog
 from `~/.pi/agent/models-store.json`, skips the fetch when `allowNetwork` is false, and publishes
 **and persists** whatever `fetchModels` returns. Never hand-roll a cache here. `discovery.ts` keeps
-only an in-memory `DiscoveryState` (last attempt, count, source, error) for the status command.
+only an in-memory `DiscoveryState` (last attempt, count, source, error, capability note) for the
+status command.
 
 ## Commands
 
@@ -48,7 +52,7 @@ Isolate your real config when testing install/auth behaviour:
 `$PI_CODING_AGENT_DIR/models-store.json` — delete it to test cold start, or write an entry to
 simulate an offline start with a stale catalog (that is how to watch a retired model disappear).
 
-The widget and `/isisllm` need a TTY. Drive the real TUI from a script with `script`(1) — sleep
+`/isisllm` needs a TTY. Drive the real TUI from a script with `script`(1) — sleep
 long enough for the deferred refresh, then feed keystrokes:
 
 ```bash
@@ -59,16 +63,37 @@ D=$(mktemp -d)
 ```
 
 To exercise discovery without touching the gateway, point `ISISLLM_BASE_URL` at a throwaway server
-that answers `GET /v1/models` with `{"data":[{"id":…}]}` and honours any Bearer token:
+that answers `GET /v1/models` with `{"data":[{"id":…}]}`, `GET /v1/model/info` with per-deployment
+`supports_vision` flags, and honours any Bearer token:
 
 ```bash
-printf '%s\n' 'import { createServer } from "node:http";' \
-  'createServer((_q, res) => res.end(JSON.stringify({ data: [' \
-  + '{ id: "qwen3-coder-next", max_input_tokens: 131072, max_output_tokens: 131072 },' \
-  + '{ id: "zzz-live-only", max_input_tokens: 65536, max_output_tokens: 8192 } ] })))' \
-  '.listen(8731, "127.0.0.1");' > /tmp/fakegw.mjs && node /tmp/fakegw.mjs &
+cat > /tmp/fakegw.mjs <<'JS'
+import { createServer } from "node:http";
+const models = {
+  data: [
+    { id: "qwen3-coder-next", max_input_tokens: 131072, max_output_tokens: 131072 },
+    { id: "zzz-live-only", max_input_tokens: 65536, max_output_tokens: 8192 },
+  ],
+};
+const info = {
+  data: [
+    { model_name: "zzz-live-only", model_info: { supports_vision: true } },
+    { model_name: "qwen3-coder-next", model_info: { supports_vision: false } },
+  ],
+};
+createServer((req, res) => {
+  if (!(req.headers.authorization ?? "").startsWith("Bearer ")) {
+    res.writeHead(401, { "content-type": "application/json" });
+    return res.end('{"error":"no key"}');
+  }
+  const path = new URL(req.url, "http://x").pathname;
+  res.writeHead(200, { "content-type": "application/json" });
+  res.end(JSON.stringify(path === "/v1/model/info" ? info : models));
+}).listen(8731, "127.0.0.1");
+JS
+node /tmp/fakegw.mjs &
 ISISLLM_BASE_URL=http://127.0.0.1:8731/v1 ISISLLM_API_KEY=x PI_CODING_AGENT_DIR=$(mktemp -d) \
-  pi -e ./ --list-models     # expect exactly the two ids above, never the presets
+  pi -e ./ --list-models   # two ids, never the presets; zzz-live-only shows images=yes
 ```
 
 Tests that unset an env var use `delete process.env.X` (assigning `undefined` would store the
@@ -95,8 +120,33 @@ string `"undefined"`), which is why `performance/noDelete` is off for `test/**` 
   already serving (name, `reasoning`, `input`, token fallbacks). Keep it that way.
 - **Token limits follow the deployment.** `contextWindow`/`maxTokens` resolve as settings override →
   gateway `max_input_tokens`/`max_output_tokens` → preset fallback → bundled defaults, because
-  deployments get bumped without anyone editing this repo. Every other field keeps the ordinary
-  defaults → preset → override order. Both token fields are then clamped (see below).
+  deployments get bumped without anyone editing this repo. Both token fields are then clamped
+  (see below). Every other field keeps the ordinary defaults → preset → override order — except
+  `input`, see the next bullet.
+- **Image input comes from the gateway, never from a guess.** `resolveInput()` in `metadata.ts`
+  resolves as settings override → what the gateway reported → preset → `["text"]`. Capability data
+  is read from the `/v1/models` entry (`supports_vision`, `supports_image_input`, or a modality list
+  containing `image`) and otherwise from the best-effort `{baseUrl}/model/info` probe, merged
+  conservatively across deployments (any `supports_vision: false` vetoes the model id, because
+  LiteLLM may route there). Reasons to keep it this way: pi only attaches images when
+  `model.input` includes `"image"`, and a false "yes" makes the gateway reject the turn with a 400
+  mid-task — so an unknown modality stays text-only. Do not add id-pattern guessing; if the gateway
+  cannot report a capability, `capabilities: "probe"` measures it instead (two bullets down).
+- **The `model/info` capability call must never fail discovery.** `fetchGatewayCapabilities()`
+  catches everything (403, HTML SPA, non-JSON, timeout, abort) and returns `{}` plus a one-line
+  note that `DiscoveryState.capabilities` carries for `/isisllm status` / `doctor`. It runs
+  concurrently with the model list, so it adds no wall-clock time, and `settings.capabilities: "off"`
+  skips it. Never surface anything from that payload but the flags: `litellm_params.api_base` holds
+  internal hostnames.
+- **`capabilities: "probe"` is the only active measurement, and it is opt-in.** Default `"auto"`
+  never posts a completion. When it is on, `probeImageSupport()` sends one 1-token completion with a
+  1×1 PNG per model that has **no** verdict from `/v1/models` or `/model/info` (excluded ids are
+  never asked), `PROBE_CONCURRENCY` at a time, each under the run's deadline. Only a 400/404/422
+  whose body mentions image/multimodal/vision/modality counts as "text-only"; a 401/429/500 or an
+  unrelated 400 yields *no verdict*, never a guess. Probe verdicts join the gateway band, so they
+  outrank `presets.json` in both directions — intentional, because deployments get reconfigured
+  under us (that is how `qwen3.8-flash-next` was found). Like the endpoint call it can never fail
+  discovery; it does lengthen a cold start by up to `timeoutMs`.
 - **No network in the extension factory, and never await the startup refresh.** pi starts the model
   runtime with `allowModelNetwork: false`; `session_start` triggers the network refresh
   unawaited with its own deadline so a dead gateway cannot stall boot. The refresh is deliberately
@@ -117,8 +167,8 @@ string `"undefined"`), which is why `performance/noDelete` is off for `test/**` 
   unawaited task takes the process down. Copy `ctx.modelRegistry` / `ctx.ui` into `Services`
   (`servicesOf`) before the first await, and swallow the rest.
 - **Report registered models, not `getAvailable()`.** pi hides models whose provider has no usable
-  credentials, so `getAvailable()` reads "0 models" while the user is still signing in. Widget and
-  `/isisllm` count `provider.getModels()` and add a `N/M selectable right now` note instead.
+  credentials, so `getAvailable()` reads "0 models" while the user is still signing in. `/isisllm`
+  counts `provider.getModels()` and adds a `N/M selectable right now` note instead.
 - **Pass the signal to every fetch.** `RefreshModelsContext.signal` is always present; our own
   `AbortController` deadline wraps it in `discovery.ts`/`index.ts`.
 - **`maxTokens` is always clamped to `contextWindow / 2`** (`clampMaxTokens`), minimum 1024.
@@ -148,7 +198,9 @@ string `"undefined"`), which is why `performance/noDelete` is off for `test/**` 
 2. Add an entry to `presets.json` → `models`:
    - `name` — label in `/model` (no `(unverified)` suffix; curated entries don't get one).
    - `reasoning` — true only if the model actually emits reasoning/thinking output.
-   - `input` — `["text"]` unless you verified image input works; `/v1/models` never tells us.
+   - `input` — usually leave it alone: what the gateway reports wins over this entry (see the
+     `input` invariant). Write `["text"]` to record a verified text-only deployment; add `"image"`
+     only when the gateway vouches for it or you verified an image request succeeds.
    - `contextWindow` / `maxTokens` — fallbacks only: the gateway's reported limits win, so these are
      what users get when `/v1/models` omits them. Keep `maxTokens` at most half of `contextWindow`.
    - `compat.maxTokensField` — `"max_tokens"` for vLLM/LiteLLM (`max_completion_tokens` is rejected).
@@ -164,15 +216,26 @@ string `"undefined"`), which is why `performance/noDelete` is off for `test/**` 
 
 ## Gateway gotchas
 
-- Only `/v1/models` answers JSON. Other LiteLLM admin paths (`/v2/model/info`, `/model/group`, …)
-  are swallowed by the Open WebUI SPA and return **HTML with status 200**, which is why a wrong
-  base URL must be detected by content type, not status code.
+- Paths under `/v1/` answer JSON; the bare admin paths (`/model/info`, `/v2/model/info`,
+  `/model/group`, `/health/readiness`, …) are swallowed by the Open WebUI SPA and return **HTML
+  with status 200**, which is why a wrong base URL must be detected by content type, not status
+  code. `GET {baseUrl}/model/info` therefore works (`{ data: [{ model_name, litellm_params,
+  model_info }] }`) even though `/model/info` does not.
 - No key → `401`. A key that can chat but not list models also fails here — surface it as an
-  auth error; pi keeps showing whatever it had cached.
+  auth error; pi keeps showing whatever it had cached. Our virtual key is restricted to
+  `llm_api_routes` yet is allowed to call `/v1/model/info` today (verified 2026-11-03); that is a
+  LiteLLM permission that could change, hence the graceful degradation.
 - `max_output_tokens` frequently equals the context window (see the clamp invariant), and some
   models report no limits at all.
 - `/v1/models` carries **no** capability data: no reasoning flag, no modalities, no cost. Cost is
-  always `0` here.
+  always `0` here. `{baseUrl}/model/info` *does* carry `supports_vision`, but it is `null` for
+  custom vLLM deployments whose upstream ids are not in LiteLLM's cost map — measured on the ISIS
+  gateway: **every flag is `null`, so nothing there makes a model image-capable**; `presets.json`
+  carries what was probed by hand (`qwen3.8-flash-next` on a multimodal engine, `qwen3.8-27b` and
+  `qwen3-coder-next` refusing image content). Deployments get reconfigured under us — flash-next
+  answered `At most 0 image(s) may be provided` and then `200` on the same payload minutes apart,
+  once the admin enabled images — so re-probe before trusting a stored verdict, and prefer asking
+  the admins to set `model_info.supports_vision` in the LiteLLM config, which every client then sees.
 - pi composes `~/.pi/agent/models.json` *above* this provider (`composeModelProvider` →
   `applyModelsJson`): same-id entries replace the discovered definitions, and extra ids are
   appended — so a stale block can pin `baseUrl`/`compat`/token limits and resurrect retired models.
@@ -208,8 +271,8 @@ When you touch TypeScript, `presets.json`, or config, before calling the change 
 3. If the change is user-visible, update `README.md` (and its Troubleshooting table), then
    `CHANGELOG.md` and `package.json` `version` in the same commit.
 4. Anything touching startup, the catalog, or credentials: run the manual checks under *Commands*
-   against the fake gateway as well as the real one. Unit tests cannot see pi's refresh races, the
-   live-only catalog, or the widget.
+   against the fake gateway as well as the real one. Unit tests cannot see pi's refresh races or
+   the live-only catalog.
 
 ## General working practices
 

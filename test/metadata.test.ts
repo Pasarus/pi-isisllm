@@ -5,16 +5,19 @@ import { describe, expect, it } from "vitest";
 import {
   buildModels,
   clampMaxTokens,
+  extractModelInfoCapabilities,
   inferReasoning,
   inferThinkingFormat,
   isCurated,
   isExcluded,
   parseGatewayEntry,
+  parseImageCapability,
   prettifyName,
+  resolveInput,
   toPiModel,
 } from "../metadata.js";
 import type { GatewayModelEntry } from "../types.js";
-import { makeConfig, makeMetadataContext } from "./helpers.js";
+import { loadFixture, makeConfig, makeMetadataContext } from "./helpers.js";
 
 function context() {
   return makeMetadataContext();
@@ -47,12 +50,19 @@ describe("curated metadata", () => {
       "qwen3.8-27b": [131072, 16384],
       "qwen3.8-flash-next": [262144, 131072],
     };
+    const curatedInput: Record<string, ["text"] | ["text", "image"]> = {
+      "qwen3-coder-next": ["text"],
+      "qwen3-coder-next-4bit": ["text"],
+      "qwen3.8-27b": ["text"],
+      "qwen3.8-flash-next": ["text", "image"],
+    };
     for (const model of models) {
       expect(model.provider).toBe("isisllm");
       expect(model.api).toBe("openai-completions");
       expect(model.baseUrl).toBe("https://gw.example.test/v1");
       expect(model.reasoning).toBe(true);
-      expect(model.input).toEqual(["text"]);
+      // Only flash-next is served with a multimodal engine; the others reject image content.
+      expect(model.input).toEqual(curatedInput[model.id]);
       expect([model.contextWindow, model.maxTokens]).toEqual(curatedLimits[model.id]);
       expect(model.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
       expect(model.compat?.maxTokensField).toBe("max_tokens");
@@ -260,11 +270,51 @@ describe("heuristics", () => {
   });
 });
 
+describe("parseImageCapability", () => {
+  it("reads LiteLLM's capability flags, including the negatives", () => {
+    expect(parseImageCapability({ supports_vision: true })).toBe(true);
+    expect(parseImageCapability({ supports_vision: false })).toBe(false);
+    expect(parseImageCapability({ supports_image_input: "true" })).toBe(true);
+    expect(parseImageCapability({ supports_vision: 0 })).toBe(false);
+  });
+
+  it("reads modality lists when there is no flag", () => {
+    expect(parseImageCapability({ input_modalities: ["text", "image"] })).toBe(true);
+    expect(parseImageCapability({ supported_input_modalities: ["text"] })).toBe(false);
+    expect(parseImageCapability({ supported_modalities: ["TEXT", "Image"] })).toBe(true);
+  });
+
+  it("stays silent rather than guessing", () => {
+    expect(parseImageCapability({})).toBeUndefined();
+    expect(parseImageCapability({ supports_vision: null })).toBeUndefined();
+    expect(parseImageCapability({ supports_embedding_image_input: true })).toBeUndefined();
+    expect(parseImageCapability({ input_modalities: [] })).toBeUndefined();
+    expect(parseImageCapability({ input_modalities: "image" })).toBeUndefined();
+  });
+
+  it("flags win over modality lists", () => {
+    expect(parseImageCapability({ supports_vision: false, input_modalities: ["image"] })).toBe(
+      false,
+    );
+  });
+});
+
 describe("parseGatewayEntry", () => {
   it("accepts entries with usable ids", () => {
     expect(parseGatewayEntry({ id: " qwen3-x ", max_input_tokens: 4096 })).toEqual({
       id: "qwen3-x",
       max_input_tokens: 4096,
+    });
+  });
+
+  it("keeps a capability flag the listing carries", () => {
+    expect(parseGatewayEntry({ id: "qwen3-vl", supports_vision: true })).toEqual({
+      id: "qwen3-vl",
+      capabilities: { image: true },
+    });
+    expect(parseGatewayEntry({ id: "qwen3-coder", supports_vision: false })).toEqual({
+      id: "qwen3-coder",
+      capabilities: { image: false },
     });
   });
 
@@ -274,6 +324,126 @@ describe("parseGatewayEntry", () => {
     expect(parseGatewayEntry({ id: "" })).toBeNull();
     expect(parseGatewayEntry({})).toBeNull();
     expect(parseGatewayEntry({ id: "x", max_input_tokens: -5 })).toEqual({ id: "x" });
+  });
+});
+
+describe("extractModelInfoCapabilities", () => {
+  const parsed = loadFixture("model-info");
+
+  it("reads supports_vision per model id", () => {
+    const capabilities = extractModelInfoCapabilities(parsed);
+    expect(capabilities["qwen3-vl-32b"]).toEqual({ image: true });
+    expect(capabilities["qwen3-coder-next"]).toEqual({ image: false });
+  });
+
+  it('treats a null flag as "the gateway did not say"', () => {
+    expect(extractModelInfoCapabilities(parsed)["qwen3.8-27b"]).toEqual({});
+    expect(extractModelInfoCapabilities(parsed)["no-model-info"]).toEqual({});
+  });
+
+  it("lets one text-only deployment veto a mixed model group, either order", () => {
+    const capabilities = extractModelInfoCapabilities(parsed);
+    expect(capabilities["mixed-group"]).toEqual({ image: false });
+    expect(capabilities["vision-second"]).toEqual({ image: false });
+  });
+
+  it("reads modality lists too", () => {
+    expect(extractModelInfoCapabilities(parsed)["qwen3-omni"]).toEqual({ image: true });
+  });
+
+  it("returns nothing for a body that is not a model-info list", () => {
+    expect(extractModelInfoCapabilities(undefined)).toEqual({});
+    expect(extractModelInfoCapabilities({ data: "nope" })).toEqual({});
+    expect(extractModelInfoCapabilities({ data: [{ id: "qwen3-vl" }] })).toEqual({});
+  });
+});
+
+describe("resolveInput", () => {
+  const vision = { id: "qwen3-vl-32b" };
+
+  it("defaults to text only when nobody said anything", () => {
+    expect(resolveInput({ id: "llama-3.3-70b-instruct" }, makeMetadataContext())).toEqual({
+      input: ["text"],
+      source: "default",
+    });
+  });
+
+  it("follows the gateway ahead of the curated metadata", () => {
+    // qwen3-coder-next is curated as text-only; a gateway that says otherwise wins.
+    const curated = makeMetadataContext({}, { "qwen3-coder-next": { image: true } });
+    expect(resolveInput({ id: "qwen3-coder-next" }, curated)).toEqual({
+      input: ["text", "image"],
+      source: "gateway",
+    });
+  });
+
+  it('lets a gateway "no" veto a curated "yes"', () => {
+    // qwen3.8-flash-next is curated as image-capable; a deployment that says it cannot read
+    // images still wins, because sending an image it rejects fails the turn with a 400.
+    const ctx = makeMetadataContext({}, { "qwen3.8-flash-next": { image: false } });
+    expect(resolveInput({ id: "qwen3.8-flash-next" }, ctx)).toEqual({
+      input: ["text"],
+      source: "gateway",
+    });
+  });
+
+  it('keeps a curated "yes" when the gateway reports nothing', () => {
+    // The real state of the ISIS gateway: supports_vision is null for these ids because they are
+    // not in LiteLLM's cost map, so presets.json is the only thing that knows flash-next is served
+    // by a multimodal engine.
+    const ctx = makeMetadataContext({}, { "qwen3.8-flash-next": {} });
+    expect(resolveInput({ id: "qwen3.8-flash-next" }, ctx)).toEqual({
+      input: ["text", "image"],
+      source: "preset",
+    });
+  });
+
+  it("lets a local override pin what the gateway claims", () => {
+    const ctx = makeMetadataContext(
+      { models: { "qwen3-vl-32b": { input: ["text"] } } },
+      { "qwen3-vl-32b": { image: true } },
+    );
+    expect(resolveInput(vision, ctx)).toEqual({ input: ["text"], source: "override" });
+  });
+
+  it("prefers a flag on the /v1/models entry over the model-info endpoint", () => {
+    const ctx = makeMetadataContext({}, { "qwen3-vl-32b": { image: true } });
+    expect(resolveInput({ id: "qwen3-vl-32b", capabilities: { image: false } }, ctx)).toEqual({
+      input: ["text"],
+      source: "gateway",
+    });
+  });
+
+  it("falls back to curated metadata when the endpoint only knows the id vaguely", () => {
+    const ctx = makeMetadataContext({}, { "qwen3-coder-next": {} });
+    expect(resolveInput({ id: "qwen3-coder-next" }, ctx)).toEqual({
+      input: ["text"],
+      source: "preset",
+    });
+  });
+});
+
+describe("image ingestion", () => {
+  it("registers a gateway-verified vision model so pi will attach images", () => {
+    const entries = ["qwen3-vl-32b", "qwen3-coder-next", "qwen3.8-27b"]
+      .map((id) => parseGatewayEntry({ id }))
+      .filter((entry): entry is GatewayModelEntry => entry !== null);
+    const models = buildModels(entries, {
+      ...makeMetadataContext({}, extractModelInfoCapabilities(loadFixture("model-info"))),
+    });
+    expect(models.find((model) => model.id === "qwen3-vl-32b")?.input).toEqual(["text", "image"]);
+    expect(models.find((model) => model.id === "qwen3-coder-next")?.input).toEqual(["text"]);
+    // No verdict (supports_vision: null) leaves the curated text-only metadata in charge.
+    expect(models.find((model) => model.id === "qwen3.8-27b")?.input).toEqual(["text"]);
+  });
+
+  it("gives a gateway-vision model image input even when it is an unknown id", () => {
+    const model = toPiModel(
+      { id: "brand-new-vision", capabilities: { image: true } },
+      makeMetadataContext(),
+    );
+    expect(model.input).toEqual(["text", "image"]);
+    expect(model.name).toBe("Brand New Vision (unverified)");
   });
 });
 

@@ -1,0 +1,91 @@
+{
+  "data": [
+    {
+      "model_name": "qwen3-vl-32b",
+      "litellm_params": {
+        "api_base": "http://vllm-vl.internal.invalid:8000/v1",
+        "model": "openai/qwen3-vl-32b"
+      },
+      "model_info": {
+        "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "db_model": false,
+        "mode": "chat",
+        "max_input_tokens": 262144,
+        "max_output_tokens": 262144,
+        "supports_vision": true,
+        "supports_function_calling": true
+      }
+    },
+    {
+      "model_name": "qwen3-coder-next",
+      "litellm_params": {
+        "api_base": "http://vllm-coder.internal.invalid:8000/v1",
+        "model": "openai/qwen3-coder-next"
+      },
+      "model_info": {
+        "id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "db_model": false,
+        "mode": "chat",
+        "max_input_tokens": 131072,
+        "supports_vision": false
+      }
+    },
+    {
+      "model_name": "qwen3.8-27b",
+      "litellm_params": {
+        "api_base": "http://vllm-qwen-27b-0.internal.invalid:8000/v1",
+        "model": "openai/qwen3.8-27b"
+      },
+      "model_info": {
+        "id": "cccccccccccccccccccccccccccccccc",
+        "db_model": false,
+        "mode": null,
+        "max_input_tokens": 131072,
+        "supports_vision": null
+      }
+    },
+    {
+      "model_name": "qwen3.8-flash-next",
+      "litellm_params": {
+        "api_base": "http://vllm-qwen.internal.invalid:8000/v1",
+        "model": "openai/qwen3.8-flash-next"
+      },
+      "model_info": {
+        "id": "ggggggggggggggggggggggggggggggggggg",
+        "db_model": false,
+        "mode": null,
+        "max_input_tokens": 262144,
+        "supports_vision": null
+      }
+    },
+    {
+      "model_name": "mixed-group",
+      "litellm_params": { "model": "openai/known-vision-model" },
+      "model_info": { "id": "dddd1", "supports_vision": true }
+    },
+    {
+      "model_name": "mixed-group",
+      "litellm_params": { "model": "openai/text-only-quant" },
+      "model_info": { "id": "dddd2", "supports_vision": false }
+    },
+    {
+      "model_name": "vision-second",
+      "litellm_params": { "model": "openai/text-only-quant" },
+      "model_info": { "id": "eeee1", "supports_vision": false }
+    },
+    {
+      "model_name": "vision-second",
+      "litellm_params": { "model": "openai/known-vision-model" },
+      "model_info": { "id": "eeee2", "supports_vision": true }
+    },
+    {
+      "model_name": "qwen3-omni",
+      "litellm_params": { "model": "openai/qwen3-omni" },
+      "model_info": { "id": "ffff", "input_modalities": ["text", "image", "audio"] }
+    },
+    {
+      "model_name": "no-model-info",
+      "litellm_params": { "api_base": "http://secret.internal.invalid/v1" }
+    }
+  ]
+}
